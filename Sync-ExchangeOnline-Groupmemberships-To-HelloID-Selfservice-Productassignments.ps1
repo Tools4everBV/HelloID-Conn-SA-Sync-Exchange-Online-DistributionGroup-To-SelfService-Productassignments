@@ -1,10 +1,10 @@
 #####################################################
 # HelloID-Conn-SA-Sync-Exchange-Online-DistributionGroup-To-HelloID-Selfservice-Productassignments
 #
-# Version: 1.0.1
+# Version: 1.1.0
 #####################################################
 # Set to false to acutally perform actions - Only run as DryRun when testing/troubleshooting!
-$dryRun = $true
+$dryRun = $false
 # Set to true to log each individual action - May cause lots of logging, so use with cause, Only run testing/troubleshooting!
 $verboseLogging = $false
 
@@ -24,15 +24,16 @@ $WarningPreference = "Continue"
 # $portalApiKey = "" # Set from Global Variable
 # $portalApiSecret = "" # Set from Global Variable
 
-# Exchange Online Connection Configuration
-# $EntraOrganization = "" # Set from Global Variable
-# $EntraTenantID = "" # Set from Global Variable
-# $EntraAppID = "" # Set from Global Variable
-# $EntraAppSecret = "" # Set from Global Variable
-$exchangeGroupsFilter = "DisplayName -like 'DistributionGroup*'" # Optional, when no filter is provided ($exchangeGroupsFilter = $null), all mailboxes will be queried
+# Exchange Online connection (required)
+# $EntraIdOrganization = "" # Set from Global Variable
+# $EntraIdAppId = "" # Set from Global Variable
+# $EntraIdCertificateBase64String = "" # Set from Global Variable
+# $EntraIdCertificatePassword = "" # Set from Global Variable
+
+$exchangeGroupsFilter = "DisplayName -like 'DistributionGroup*'" # Optional, when no filter is provided ($exchangeGroupsFilter = $null), all distribution group will be queried
 
 # PowerShell commands to import
-$exchangeOnlineCommands = @(
+$commands = @(
     "Get-User"
     , "Get-DistributionGroup"
     , "Get-DistributionGroupMember"
@@ -43,9 +44,9 @@ $ProductSkuPrefix = 'EXOGRP' # Optional, when no SkuPrefix is provided ($Product
 $PowerShellActionName = "Grant-PermissionToDistributionGroup" # Define the name of the PowerShell action
 
 #Correlation Configuration
-# The name of the property of HelloID users to match to EXO users - value has to match the value of the propertye specified in $exoUserCorrelationProperty
+# The name of the property of HelloID users to match to EXO users - value has to match the value of the property specified in $exoUserCorrelationProperty
 $helloIDUserCorrelationProperty = "username"
-# The name of the property of EXO users to match to HelloID users - value has to match the value of the propertye specified in $helloIDUserCorrelationProperty
+# The name of the property of EXO users to match to HelloID users - value has to match the value of the property specified in $helloIDUserCorrelationProperty
 $exoUserCorrelationProperty = "userPrincipalName"
 
 #region functions
@@ -210,6 +211,29 @@ function Invoke-HIDRestmethod {
         throw $_
     }
 }
+
+function Get-MSEntraCertificate {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]
+        $CertificateBase64String,
+        
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]
+        $CertificatePassword
+    )
+    try {
+        $rawCertificate = [system.convert]::FromBase64String($CertificateBase64String)
+        $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($rawCertificate, $CertificatePassword, [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable)
+        Write-Output $certificate
+    }
+    catch {
+        $PSCmdlet.ThrowTerminatingError($_)
+    }
+}
 #endregion functions
 
 #region script
@@ -372,70 +396,62 @@ catch {
 Hid-Write-Status -Event Information -Message "------[Exchange Online]-----------"
 
 # Import module
-try {
-    $moduleName = "ExchangeOnlineManagement"
-    $importModule = Import-Module -Name $moduleName -ErrorAction Stop -Verbose:$false
-}
+try {    
+    $actionMessage = "importing module [ExchangeOnlineManagement]"
+    $importModuleSplatParams = @{
+        Name        = "ExchangeOnlineManagement"
+        Cmdlet      = $commands
+        Verbose     = $false
+        ErrorAction = "Stop"
+    }
+    $null = Import-Module @importModuleSplatParams
+
+    #region Retrieving certificate
+    $actionMessage = "retrieving certificate"
+    $certificate = Get-MSEntraCertificate -CertificateBase64String $EntraIdCertificateBase64String -CertificatePassword $EntraIdCertificatePassword
+    #endregion Retrieving certificate
+    
+    #region Connect to Microsoft Exchange Online
+    # Docs: https://learn.microsoft.com/en-us/powershell/module/exchange/connect-exchangeonline?view=exchange-ps
+    $actionMessage = "connecting to Microsoft Exchange Online"
+    $createExchangeSessionSplatParams = @{
+        Organization          = $EntraIdOrganization
+        AppID                 = $EntraIdAppId
+        Certificate           = $certificate
+        CommandName           = $commands
+        ShowBanner            = $false
+        ShowProgress          = $false
+        TrackPerformance      = $false
+        SkipLoadingCmdletHelp = $true
+        SkipLoadingFormatData = $true
+        ErrorAction           = "Stop"
+    }
+    $null = Connect-ExchangeOnline @createExchangeSessionSplatParams
+    Write-Information "Connected to Microsoft Exchange Online"
+} 
 catch {
     $ex = $PSItem
-    $errorMessage = Get-ErrorMessage -ErrorObject $ex
-
-    Write-Verbose "Error at Line [$($ex.InvocationInfo.ScriptLineNumber)]: $($ex.InvocationInfo.Line). Error: $($($errorMessage.VerboseErrorMessage))"
-
-    throw "Error importing module [$moduleName]. Error Message: $($errorMessage.AuditErrorMessage)"
-}
-
-# Connect to Exchange
-try {
-    # Create access token
-    Write-Verbose "Creating Access Token"
-
-    $baseUri = "https://login.microsoftonline.com/"
-    $authUri = $baseUri + "$EntraTenantID/oauth2/token"
-    
-    $body = @{
-        grant_type    = "client_credentials"
-        client_id     = "$EntraAppID"
-        client_secret = "$EntraAppSecret"
-        resource      = "https://outlook.office365.com"
+    if (-not [string]::IsNullOrEmpty($ex.Exception.Data.RemoteException.Message)) {
+        $warningMessage = "Error at Line [$($ex.InvocationInfo.ScriptLineNumber)]: $($ex.InvocationInfo.Line). Error: $($ex.Exception.Data.RemoteException.Message)"
+        $auditMessage = "Error $($actionMessage). Error: $($ex.Exception.Data.RemoteException.Message)"        
     }
-    
-    $Response = Invoke-RestMethod -Method POST -Uri $authUri -Body $body -ContentType "application/x-www-form-urlencoded" -UseBasicParsing:$true -Verbose:$false
-    $accessToken = $Response.access_token
-
-    # Connect to Exchange Online in an unattended scripting scenario using an access token.
-    Write-Verbose "Connecting to Exchange Online"
-
-    $exchangeSessionParams = @{
-        Organization     = $EntraOrganization
-        AppID            = $EntraAppID
-        AccessToken      = $accessToken
-        CommandName      = $exchangeOnlineCommands
-        ShowBanner       = $false
-        ShowProgress     = $false
-        TrackPerformance = $false
-        ErrorAction      = "Stop"
+    else {
+        $warningMessage = "Error at Line [$($ex.InvocationInfo.ScriptLineNumber)]: $($ex.InvocationInfo.Line). Error: $($ex.Exception.Message)"
+        $auditMessage = "Error $($actionMessage). Error: $($ex.Exception.Message)"
     }
-    $exchangeSession = Connect-ExchangeOnline @exchangeSessionParams -Verbose:$false
-    
-    Write-Information "Successfully connected to Exchange Online"
-}
-catch {
-    $ex = $PSItem
-    $errorMessage = Get-ErrorMessage -ErrorObject $ex
-
-    Write-Verbose "Error at Line [$($ex.InvocationInfo.ScriptLineNumber)]: $($ex.InvocationInfo.Line). Error: $($errorMessage.VerboseErrorMessage)"
-    throw "Error connecting to Exchange Online. Error Message: $($errorMessage.AuditErrorMessage)"
+    Hid-Write-Status -Event Error -Message $warningMessage
+    Hid-Write-Status -Event Error -Message $auditMessage
+    throw $auditMessage
 }
 
 #region Get Exchange Online Distribution Groups
 # Get Exchange Online Distribution Groups
 try {  
     $exchangeQuerySplatParams = @{
-        Filter               = $exchangeGroupsFilter
-        ResultSize           = "Unlimited"
-        Verbose              = $false
-        ErrorAction          = "Stop"
+        Filter      = $exchangeGroupsFilter
+        ResultSize  = "Unlimited"
+        Verbose     = $false
+        ErrorAction = "Stop"
     }
 
     Hid-Write-Status -Event Information -Message "Querying Exchange Online Distribution Groups that match filter [$($exchangeQuerySplatParams.Filter)]"
@@ -503,7 +519,6 @@ try {
 
             # Filter out UserMailbox
             $groupMembers = $groupMembers | Where-Object { ($_.RecipientType -eq 'UserMailbox') }
-            # Hid-Write-Status -Event Warning -Message "groupMembers: [$($groupMembers | ConvertTo-Json)]"
 
             foreach ($groupMember in $groupMembers) {
                 $groupUser = $null
@@ -511,8 +526,6 @@ try {
                 if ($null -ne $groupMember) {
                     $groupUser = $null
                     $groupUser = $exoUsersGroupedOnGuid["$($groupMember.Guid)"]
-                    # Hid-Write-Status -Event Warning -Message "groupUser: [$($groupUser | ConvertTo-Json)]"
-                    # Hid-Write-Status -Event Warning -Message "groupMember: [$($groupMember | ConvertTo-Json)]"
                     if ($null -ne $groupUser) {
                         $userObject = [PSCustomObject]@{
                             Id                = $groupUser.id
@@ -571,11 +584,11 @@ try {
         $exoGroup = $null
         $exoGroup = $exoGroupsUserMembersGrouped["$($exoGroupGuid)"]
         if (($exoGroup | Measure-Object).Count -eq 0) {
-            Hid-Write-Status -Event Error -Message "No Exchange Online Mailbox found with Guid [$($exoGroupGuid)] for Product [$($product.name)]"
+            Hid-Write-Status -Event Error -Message "No Exchange Online distribution groups found with Guid [$($exoGroupGuid)] for Product [$($product.name)]"
             continue
         }
         elseif (($exoGroup | Measure-Object).Count -gt 1) {
-            Hid-Write-Status -Event Error -Message "Multiple Exchange Online Mailboxes found with Guid [$($exoGroupGuid)] for Product [$($product.name)]. Please correct this so the $adGroupCorrelationProperty of the AD group is unique"
+            Hid-Write-Status -Event Error -Message "Multiple Exchange Online distribution groups found with Guid [$($exoGroupGuid)] for Product [$($product.name)]"
             continue
         }
 
@@ -585,15 +598,12 @@ try {
         # Get HelloID user objects to assign to the product
         $productUsersInScope = [System.Collections.ArrayList]@()
         foreach ($exoUser in $exoUsersInScope) {
-            # Hid-Write-Status -Event Warning -Message "exoUser: [$($exoUser | ConvertTo-Json)]"
-            Hid-Write-Status -Event Warning -Message "exoUser: [$($exoUser.userPrincipalName)]"
             $helloIDUser = $null
             $helloIDUser = $helloIDUsersGrouped["$($exoUser.$exoUserCorrelationProperty)"]
 
             if (($helloIDUser | Measure-Object).Count -eq 0) {
                 if ($verboseLogging -eq $true) {
                     Write-Verbose "No HelloID user found with $helloIDUserCorrelationProperty [$($exoUser.$exoUserCorrelationProperty)] for EXO user [$($exoUser.Id)] for Product [$($product.name)]"
-                    continue
                 }
             }
             else {
@@ -615,7 +625,7 @@ try {
                 productName            = "$($product.name)"
                 userGuid               = "$($newProductAssignment.userGuid)"
                 userName               = "$($newProductAssignment.userName)"
-                source                 = "SyncEXOFullAccessPermissionsToProductAssignments"
+                source                 = "SyncEXODistributionGroupPermissionsToProductAssignments"
                 executeApprovalActions = $false
             }
 
@@ -630,7 +640,7 @@ try {
                 productName            = "$($product.name)"
                 userGuid               = "$($obsoleteProductassignment.userGuid)"
                 userName               = "$($obsoleteProductassignment.userName)"
-                source                 = "SyncEXOFullAccessPermissionsToProductAssignments"
+                source                 = "SyncEXODistributionGroupPermissionsToProductAssignments"
                 executeApprovalActions = $false
             }
     
@@ -690,7 +700,7 @@ try {
                 userGuid               = "$($newProductAssignmentObject.userGuid)"
                 source                 = "$($newProductAssignmentObject.source)"
                 executeApprovalActions = $newProductAssignmentObject.executeApprovalActions
-                comment                = "Synchronized assignment from EXO Full Access Permission"
+                comment                = "Synchronized assignment from EXO Distribution Group permissions"
             } | ConvertTo-Json
 
             $splatParams = @{
