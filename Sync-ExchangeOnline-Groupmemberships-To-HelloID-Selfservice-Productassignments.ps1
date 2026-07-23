@@ -1,7 +1,7 @@
 #####################################################
 # HelloID-Conn-SA-Sync-Exchange-Online-DistributionGroup-To-HelloID-Selfservice-Productassignments
 #
-# Version: 1.0.1
+# Version: 1.0.2
 #####################################################
 # Set to false to acutally perform actions - Only run as DryRun when testing/troubleshooting!
 $dryRun = $true
@@ -432,10 +432,13 @@ catch {
 # Get Exchange Online Distribution Groups
 try {  
     $exchangeQuerySplatParams = @{
-        Filter               = $exchangeGroupsFilter
         ResultSize           = "Unlimited"
         Verbose              = $false
         ErrorAction          = "Stop"
+    }
+
+    if (-not [string]::IsNullOrEmpty($exchangeGroupsFilter)) {
+        $exchangeQuerySplatParams.Filter = $exchangeGroupsFilter
     }
 
     Hid-Write-Status -Event Information -Message "Querying Exchange Online Distribution Groups that match filter [$($exchangeQuerySplatParams.Filter)]"
