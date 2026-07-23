@@ -1,10 +1,12 @@
 #####################################################
 # HelloID-Conn-SA-Sync-Exchange-Online-DistributionGroup-To-HelloID-Selfservice-Productassignments
 #
-# Version: 1.1.0
+# Version: 1.1.1
 #####################################################
+
 # Set to false to acutally perform actions - Only run as DryRun when testing/troubleshooting!
 $dryRun = $false
+
 # Set to true to log each individual action - May cause lots of logging, so use with cause, Only run testing/troubleshooting!
 $verboseLogging = $false
 
@@ -30,7 +32,7 @@ $WarningPreference = "Continue"
 # $EntraIdCertificateBase64String = "" # Set from Global Variable
 # $EntraIdCertificatePassword = "" # Set from Global Variable
 
-$exchangeGroupsFilter = "DisplayName -like 'DistributionGroup*'" # Optional, when no filter is provided ($exchangeGroupsFilter = $null), all distribution group will be queried
+$exchangeGroupsFilter = "DisplayName -like 'DistributionGroup*'" # Optional, when no filter is provided ($exchangeGroupsFilter = $null), all exchange groups will be queried
 
 # PowerShell commands to import
 $commands = @(
@@ -448,10 +450,13 @@ catch {
 # Get Exchange Online Distribution Groups
 try {  
     $exchangeQuerySplatParams = @{
-        Filter      = $exchangeGroupsFilter
         ResultSize  = "Unlimited"
         Verbose     = $false
         ErrorAction = "Stop"
+    }
+
+    if (-not [string]::IsNullOrEmpty($exchangeGroupsFilter)) {
+        $exchangeQuerySplatParams['Filter'] = $exchangeGroupsFilter
     }
 
     Hid-Write-Status -Event Information -Message "Querying Exchange Online Distribution Groups that match filter [$($exchangeQuerySplatParams.Filter)]"
